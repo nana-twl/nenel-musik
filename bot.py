@@ -1,4 +1,3 @@
-
 import os
 import html
 import uuid
@@ -35,11 +34,6 @@ from telegram.ext import (
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-
-if not TELEGRAM_TOKEN:
-    raise RuntimeError(
-        "TELEGRAM_TOKEN belum diisi di file .env"
-    )
 
 
 # =========================================================
@@ -711,23 +705,30 @@ async def tagall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    prefix = (
-        "📢 <b>TAG ALL</b>\n\n"
-        " ".join(
+    # Pecah berdasarkan user, bukan berdasarkan karakter, agar tag HTML tidak
+    # pernah terpotong di tengah dan ditolak oleh Telegram.
+    max_length = 3500
+    chunks = []
+    current = "📢 <b>TAG ALL</b>\n\n"
+
+    for user in users:
+        mention = (
             f'<a href="tg://user?id={user.id}">'
             f'{html.escape(user.first_name or "Member")}'
             f'</a>'
-            for user in users
         )
-    )
+        candidate = f"{current} {mention}"
 
-    # Telegram message limit, pecah jika perlu.
-    max_length = 3500
+        if len(candidate) > max_length and current.strip():
+            chunks.append(current)
+            current = mention
+        else:
+            current = candidate
 
-    while prefix:
-        chunk = prefix[:max_length]
-        prefix = prefix[max_length:]
+    if current.strip():
+        chunks.append(current)
 
+    for chunk in chunks:
         await update.message.reply_text(
             chunk,
             parse_mode=ParseMode.HTML,
@@ -1051,92 +1052,95 @@ async def music_worker(
         MusicState(),
     )
 
-    while state.queue:
-        item = state.queue.pop(0)
-        state.current = item
-        state.skip_requested = False
-
-        filepath = None
-
-        try:
-            message = await bot.send_message(
-                chat_id,
-                "📥 <b>Mengunduh lagu...</b>\n\n"
-                f"🎵 {html.escape(item['title'])}",
-                parse_mode=ParseMode.HTML,
-            )
-
-            filepath, info = await asyncio.to_thread(
-                download_audio,
-                item["id"],
-                item["request_id"],
-            )
-
-            if state.skip_requested:
-                await message.edit_text(
-                    "⏭️ Lagu dilewati."
-                )
-                continue
-
-            real_title = info.get(
-                "title",
-                item["title"],
-            )
-
-            performer = (
-                info.get("artist")
-                or info.get("uploader")
-                or ""
-            )
-
-            await message.edit_text(
-                "📤 <b>Mengirim lagu...</b>",
-                parse_mode=ParseMode.HTML,
-            )
-
-            with open(filepath, "rb") as audio:
-                await bot.send_audio(
-                    chat_id=chat_id,
-                    audio=audio,
-                    caption=(
-                        f"🎵 <b>"
-                        f"{html.escape(real_title)}"
-                        f"</b>"
-                    ),
-                    parse_mode=ParseMode.HTML,
-                    title=real_title[:64],
-                    performer=(
-                        performer[:64]
-                        if performer
-                        else None
-                    ),
-                )
-
-            try:
-                await message.delete()
-            except TelegramError:
-                pass
-
-        except Exception as e:
-            await bot.send_message(
-                chat_id,
-                "⚠️ Gagal memproses lagu.\n\n"
-                f"<code>{html.escape(str(e)[:700])}</code>",
-                parse_mode=ParseMode.HTML,
-            )
-
-        finally:
-            if filepath and filepath.exists():
-                try:
-                    filepath.unlink()
-                except OSError:
-                    pass
-
-            state.current = None
+    try:
+        while state.queue:
+            item = state.queue.pop(0)
+            state.current = item
             state.skip_requested = False
 
-    state.worker = None
+            filepath = None
 
+            try:
+                message = await bot.send_message(
+                    chat_id,
+                    "📥 <b>Mengunduh lagu...</b>\n\n"
+                    f"🎵 {html.escape(item['title'])}",
+                    parse_mode=ParseMode.HTML,
+                )
+
+                filepath, info = await asyncio.to_thread(
+                    download_audio,
+                    item["id"],
+                    item["request_id"],
+                )
+
+                if state.skip_requested:
+                    await message.edit_text(
+                        "⏭️ Lagu dilewati."
+                    )
+                    continue
+
+                real_title = info.get(
+                    "title",
+                    item["title"],
+                )
+
+                performer = (
+                    info.get("artist")
+                    or info.get("uploader")
+                    or ""
+                )
+
+                await message.edit_text(
+                    "📤 <b>Mengirim lagu...</b>",
+                    parse_mode=ParseMode.HTML,
+                )
+
+                with open(filepath, "rb") as audio:
+                    await bot.send_audio(
+                        chat_id=chat_id,
+                        audio=audio,
+                        caption=(
+                            f"🎵 <b>"
+                            f"{html.escape(real_title)}"
+                            f"</b>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                        title=real_title[:64],
+                        performer=(
+                            performer[:64]
+                            if performer
+                            else None
+                        ),
+                    )
+
+                try:
+                    await message.delete()
+                except TelegramError:
+                    pass
+
+            except Exception as e:
+                await bot.send_message(
+                    chat_id,
+                    "⚠️ Gagal memproses lagu.\n\n"
+                    f"<code>{html.escape(str(e)[:700])}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+
+            finally:
+                if filepath and filepath.exists():
+                    try:
+                        filepath.unlink()
+                    except OSError:
+                        pass
+
+                state.current = None
+                state.skip_requested = False
+
+    finally:
+        state.current = None
+        state.skip_requested = False
+        state.worker = None
 
 async def music_select(
     update: Update,
@@ -1533,6 +1537,11 @@ async def error_handler(
 # =========================================================
 
 def main():
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError(
+            "TELEGRAM_TOKEN belum diisi di file .env"
+        )
+
     print("")
     print("========================================")
     print("🎀 ZHERAYA BOT")
